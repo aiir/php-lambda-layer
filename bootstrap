@@ -1,0 +1,462 @@
+#!/opt/bin/php -c/opt/php.ini
+<?php
+/**
+ * AWS Lambda custom runtime for PHP
+ */
+
+/** These environment variables are set by AWS directly */
+define('AWS_LAMBDA_RUNTIME_API', getenv('AWS_LAMBDA_RUNTIME_API')); // host for the Lambda runtime API
+define('HANDLER', getenv('_HANDLER')); // path to the default PHP script
+define('LAMBDA_TASK_ROOT', getenv('LAMBDA_TASK_ROOT')); // path where the function codebase exists
+
+/** These environment variables are specific to this runtime bootstrap */
+define('CONFIG_PATH', getenv('CONFIG_PATH') ?: LAMBDA_TASK_ROOT . '/php.ini');
+define('EXTENSION_DIR', getenv('EXTENSION_DIR') ?: '/opt/lib/php/7.PHP_MINOR_VERSION/modules');
+define('LAMBDA_RUNTIME_API_VERSION', '2018-06-01'); // defines the version of the Lambda runtime API to target
+define(
+    'EVENT_TYPE_METHODS',
+    [
+        '/init/error'          => 'POST',
+        '/invocation/next'     => 'GET',
+        '/invocation/response' => 'POST',
+        '/invocation/error'    => 'POST'
+    ]
+); // maps API routes to which HTTP method they use
+define('MAX_EXECUTION_TIME', intval(getenv('MAX_EXECUTION_TIME') ?: 10)); // how long PHP should be allow to run for
+define('ACCESS_LOG', getenv('ACCESS_LOG')); // should access log string be output
+define('ACCESS_FORMAT', getenv('ACCESS_FORMAT') ?: '"%m %r%Q%q" %s %f %d'); // format access log string takes
+
+/** Test required environment variables are set */
+foreach ([AWS_LAMBDA_RUNTIME_API, HANDLER, LAMBDA_TASK_ROOT] as $value) {
+    if ($value !== false) {
+        continue;
+    }
+    echo 'Environment variables AWS_LAMBDA_RUNTIME_API, HANDLER and LAMBDA_TASK_ROOT must all be set';
+    exit(1);
+}
+
+/**
+ * Sends events to the Lambda custom runtime API.
+ * @return array
+ */
+function sendRuntimeEvent(string $type, array $body = null, array $invocation = null): array
+{
+    $isValidEventType = array_key_exists($type, EVENT_TYPE_METHODS);
+    if (!$isValidEventType) {
+        throw new Exception("Unrecognised runtime event type: ${type}");
+    }
+    $method = EVENT_TYPE_METHODS[$type];
+    if ($method === 'GET' && $body !== null) {
+        throw new Exception('Cannot set body on a GET event request');
+    }
+    $host = AWS_LAMBDA_RUNTIME_API;
+    $version = LAMBDA_RUNTIME_API_VERSION;
+    if ($invocation !== null && array_key_exists('id', $invocation)) {
+        $invocationId = $invocation['id'];
+        $type = str_replace('/invocation/', "/invocation/${invocationId}/", $type);
+    }
+    $url = "http://${host}/${version}/runtime${type}";
+
+    $ch = curl_init($url);
+
+    curl_setopt($ch, CURLOPT_FAILONERROR, true);
+    if ($method === 'POST') {
+        $bodyString = json_encode($body);
+        curl_setopt($ch, CURLOPT_POST, 1);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $bodyString);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Content-Type: application/json',
+            'Content-Length: ' . strlen($bodyString),
+        ]);
+    }
+
+    $responseHeaders = [];
+    curl_setopt($ch, CURLOPT_HEADERFUNCTION, function ($ch, $header) use (&$responseHeaders) {
+        $isValidHeader = preg_match('/:\s*/', $header);
+        if (!$isValidHeader) {
+            return strlen($header);
+        }
+        [$rawKey, $value] = preg_split('/:\s*/', $header, 2);
+        $key = strtolower($rawKey);
+        if (!array_key_exists($key, $responseHeaders)) {
+            $responseHeaders[$key] = [];
+        }
+        $responseHeaders[$key][] = trim($value);
+        return strlen($header);
+    });
+
+    $responseBody = '';
+    curl_setopt($ch, CURLOPT_WRITEFUNCTION, function ($ch, $chunk) use (&$responseBody) {
+        $responseBody .= $chunk;
+        return strlen($chunk);
+    });
+
+    curl_exec($ch);
+
+    if (curl_error($ch)) {
+        $error = curl_error($ch);
+        throw new Exception("Failed to reach Lambda runtime API: ${error}");
+    }
+
+    curl_close($ch);
+
+    $response = ['headers' => $responseHeaders, 'body' => $responseBody];
+
+    return $response;
+}
+
+/**
+ * If the runtime encounters an error during initialization, it posts an error
+ * message to the initialization error path.
+ */
+function sendInitilizationError($message): array
+{
+    $body = ['errorMessage' => $message, 'errorType' => 'InitError'];
+    $response = sendRuntimeEvent('/init/error', $body);
+
+    return $response;
+}
+
+/**
+ * If the function returns an error, the runtime formats the error into a JSON
+ * document, and posts it to the invocation error path.
+ */
+function sendInvocationError($invocation, $message): array
+{
+    $body = ['errorMessage' => $message, 'errorType' => 'InvocationError'];
+    $response = sendRuntimeEvent('/invocation/error', $body, $invocation);
+
+    return $response;
+}
+
+/**
+ * Calls the Lambda runtime API to obtain details of the next invocation.
+ */
+function getNextInvocation(): array
+{
+    try {
+        $response = sendRuntimeEvent('/invocation/next');
+    } catch (Exception $error) {
+        $message = $error->getMessage();
+        throw new Exception("Failed to fetch next Lambda invocation: ${message}");
+    }
+    ['headers' => $headers, 'body' => $body] = $response;
+    if (!array_key_exists('lambda-runtime-aws-request-id', $headers) ||
+        count($headers['lambda-runtime-aws-request-id']) !== 1) {
+        throw new Exception('Failed to determine Lambda invocation ID');
+    }
+    $id = $headers['lambda-runtime-aws-request-id'][0];
+    if (empty($body)) {
+        throw new Exception('Empty Lambda invocation response');
+    }
+
+    $event = (array) json_decode($body, true);
+    $invocation = ['id' => $id, 'event' => $event];
+
+    return $invocation;
+}
+
+/**
+ * Formats an incoming invocation event in to an HTTP request object for passing
+ * to the CGI process.
+ *
+ * @param array $event The invocation's API Gateway or ALB event object.
+ * @return array HTTP request object.
+ */
+function createRequest(array $invocation): array
+{
+    ['event' => $event] = $invocation;
+    ['httpMethod' => $method, 'path' => $path, 'body' => $body] = $event;
+
+    $eventHeader = @$event['multiValueHeaders'] ?: @$event['headers'] ?: [];
+    $headers = array_map(
+        function ($value) {
+            return is_array($value) ? @$value[0] : $value;
+        },
+        $eventHeader
+    );
+    $eventQueryParameters = @$event['multiValueQueryStringParameters'] ?: @$event['queryStringParameters'] ?: [];
+    $queryString = implode(
+        '&',
+        array_reduce(
+            array_keys($eventQueryParameters),
+            function ($carry, $key) use ($eventQueryParameters) {
+                $values = is_array($eventQueryParameters[$key]) ? $eventQueryParameters[$key] : [$eventQueryParameters[$key]];
+                foreach ($values as $value) {
+                    $carry[] = sprintf('%s=%s', $key, $value);
+                }
+                return $carry;
+            },
+            []
+        )
+    );
+
+    $isBase64Encoded = array_key_exists('isBase64Encoded', $event) && $event['isBase64Encoded'];
+    if ($isBase64Encoded) {
+        $body = base64_decode($body);
+    }
+
+    $request = [
+        'method' => $method,
+        'path' => preg_replace('/\/{2,}/', '/', $path), // basic normalisation of the path
+        'query_string' => $queryString,
+        'headers' => $headers,
+        'body' => $body,
+    ];
+
+    return $request;
+}
+
+/**
+ * Takes an incoming request object, formats it suitable for the PHP CGI
+ * process, opens a process and awaits the response.
+ */
+function performRequest(array $request): array
+{
+    [
+        'method' => $method,
+        'path' => $path,
+        'query_string' => $queryString,
+        'headers' => $requestHeaders,
+        'body' => $requestBody,
+    ] = $request;
+
+    $taskRoot = LAMBDA_TASK_ROOT;
+    $configPath = CONFIG_PATH;
+    $extensionDir = EXTENSION_DIR;
+    $absolutePath = $taskRoot . '/' . dirname(HANDLER);
+    $scriptFilename = $absolutePath . $path;
+    if (!is_file($scriptFilename)) {
+        $scriptFilename = rtrim($scriptFilename, '/') . '/index.php';
+        if (!is_file($scriptFilename)) {
+            $scriptFilename = ltrim(HANDLER, '/');
+        } else if (substr($path, -1) !== '/') {
+            return [
+                'status' => '301 Moved Permanently',
+                'statusCode' => 301,
+                'headers' => [
+                    'Location' => [$path . '/'],
+                ],
+                'body' => '',
+            ];
+        }
+    }
+    $scriptName = str_replace($absolutePath, '', $scriptFilename);
+
+    if (file_exists('/opt/bin/php-cgi')) {
+        $cgiPath = '/opt/bin/';
+    } else {
+        $cgiPath = '';
+    }
+
+    $cmd = "${cgiPath}php-cgi -c \"${configPath}\" -d extension_dir=\"${extensionDir}\"";
+    $descriptorSpec = [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']];
+    $cwd = LAMBDA_TASK_ROOT;
+    $env = array_merge(
+        $_SERVER,
+        [
+            'CONTENT_LENGTH'  => strlen($requestBody),
+            'CONTENT_TYPE'    => (@$requestHeaders['content-type'] ?: ''),
+            'QUERY_STRING'    => $queryString,
+            'REDIRECT_STATUS' => 200,
+            'REQUEST_METHOD'  => $method,
+            'REQUEST_URI'     => $path,
+            'SCRIPT_FILENAME' => $scriptFilename,
+            'SCRIPT_NAME'     => $scriptName,
+            'SERVER_PROTOCOL' => 'HTTP/1.1',
+        ]
+    );
+    unset($env['argv']);
+    foreach ($requestHeaders as $rawKey => $value) {
+        $key = 'HTTP_' . str_replace('-', '_', strtoupper($rawKey));
+        $env[$key] = $value;
+    }
+
+    $process = proc_open($cmd, $descriptorSpec, $pipes, $cwd, $env);
+    if (!is_resource($process)) {
+        $exception = new Exception('Failed to launch PHP process');
+        throw $exception;
+    }
+
+    fwrite($pipes[0], $requestBody);
+    fclose($pipes[0]);
+
+    stream_set_blocking($pipes[1], false);
+    $responseRaw = '';
+
+    $start = microtime(true);
+    $timeout = false;
+    while (!feof($pipes[1])) {
+        $duration = (microtime(true) - $start);
+        if ($duration > MAX_EXECUTION_TIME) {
+            $timeout = true;
+            break;
+        }
+        $responseRaw .= fread($pipes[1], 1024);
+        usleep(100);
+    }
+
+    fclose($pipes[1]);
+
+    $err = stream_get_contents($pipes[2]);
+    fclose($pipes[2]);
+
+    proc_terminate($process);
+
+    if ($err !== '') {
+        echo $err;
+    }
+
+    if ($timeout) {
+        $maxExecutionTime = MAX_EXECUTION_TIME;
+        echo "PHP took longer than $maxExecutionTime seconds to return response";
+
+        return [
+            'status' => '500 Internal Server Error',
+            'statusCode' => 500,
+            'headers' => [],
+            'body' => 'Internal Server Error',
+        ];
+    }
+
+    $status = '200 OK';
+    [$responseHeadersRaw, $responseBody] = explode("\r\n\r\n", $responseRaw, 2);
+    $responseHeaders = array_reduce(
+        explode(PHP_EOL, $responseHeadersRaw),
+        function ($carry, $line) use (&$status) {
+            [$key, $value] = array_map('trim', explode(':', $line, 2));
+            if ($key === 'Status') {
+                $status = $value;
+                return $carry;
+            }
+            if (!array_key_exists($key, $carry)) {
+                $carry[$key] = [];
+            }
+            $carry[$key][] = $value;
+            return $carry;
+        },
+        []
+    );
+    [$statusCode,] = explode(' ', $status, 2);
+
+    if (ACCESS_LOG) {
+        $patterns = [
+            '%m',
+            '%r',
+            '%Q',
+            '%q',
+            '%s',
+            '%f',
+            '%d',
+        ];
+        $replacements = [
+            $method,
+            $path,
+            ($queryString ? '?' : ''),
+            ($queryString ?: ''),
+            $statusCode,
+            $scriptName,
+            sprintf('%.4f', $duration),
+        ];
+        echo preg_replace_callback(
+            '/%{(.+?)}e/',
+            function ($matches) use ($env) {
+                $key = $matches[1];
+                return @$env[$key] ?: '-';
+            },
+            str_replace($patterns, $replacements, ACCESS_FORMAT)
+        ) . PHP_EOL;
+    }
+
+    return [
+        'status' => $status,
+        'statusCode' => $statusCode,
+        'headers' => $responseHeaders,
+        'body' => $responseBody,
+    ];
+}
+
+/**
+ * Formats an HTTP response in to an AWS (API Gateway Proxy or ALB) response
+ * object.
+ */
+function createResponse(array $invocation, array $httpResponse): array
+{
+    ['event' => $event] = $invocation;
+    ['status' => $status, 'statusCode' => $statusCode, 'headers' => $headers, 'body' => $body] = $httpResponse;
+    $response = ['statusCode' => (int) $statusCode, 'body' => $body];
+
+    $isApplicationLoadBalancerRequest = array_key_exists('requestContext', $event);
+    if ($isApplicationLoadBalancerRequest) {
+        $response['statusDescription'] = $status;
+    }
+
+    $hasMultiValueHeaders = array_key_exists('multiValueHeaders', $event);
+    if ($hasMultiValueHeaders) {
+        $response['multiValueHeaders'] = $headers;
+    } else {
+        $response['headers'] = array_map(
+            function ($value) {
+                return $value[0];
+            },
+            $headers
+        );
+    }
+
+    $hasBase64EncodingProperty = array_key_exists('isBase64Encoded', $event);
+    if ($hasBase64EncodingProperty) {
+        $response['isBase64Encoded'] = false;
+    }
+
+    if ($isApplicationLoadBalancerRequest) {
+        $size = strlen(json_encode($response));
+        if ($size > 1000000) {
+            echo "Response size is too large for ALB ($size bytes)" . PHP_EOL;
+
+            $errorResponse = [
+                'status' => '500 Internal Server Error',
+                'statusCode' => 500,
+                'headers' => [],
+                'body' => 'Internal Server Error',
+            ];
+
+            return createResponse($invocation, $errorResponse);
+        }
+    }
+
+    return $response;
+}
+
+/**
+ * Forwards the Lambda-formatted response object to the Lambda runtime API.
+ */
+function sendLambdaResponse(array $invocation, array $lambdaResponse): array
+{
+    return sendRuntimeEvent('/invocation/response', $lambdaResponse, $invocation);
+}
+
+/**
+ * Performs the tasks required to handle an individual incoming request.
+ */
+function handleNextRequest(): void
+{
+    try {
+        $invocation = getNextInvocation();
+    } catch (Exception $e) {
+        sendInitilizationError($e->getMessage());
+        return;
+    }
+
+    try {
+        $request = createRequest($invocation);
+        $httpResponse = performRequest($request);
+        $lambdaResponse = createResponse($invocation, $httpResponse);
+        sendLambdaResponse($invocation, $lambdaResponse);
+    } catch (Exception $e) {
+        sendInvocationError($invocation, $e->getMessage());
+    }
+}
+
+while (isset($loop) ? $loop : true) {
+    handleNextRequest();
+}

@@ -1,0 +1,29 @@
+{
+    "name": "aiir/php-lambda-layer",
+    "type": "project",
+    "description": "PHP runtime layer for AWS Lambda, allowing PHP scripts to be executed in an environment as close to a standard web server as possible",
+    "keywords": [
+        "lambda",
+        "php",
+        "runtime",
+        "layer"
+    ],
+    "authors": [
+        {
+            "name": "Andy Buckingham",
+            "email": "andy@aiir.com",
+            "homepage": "https://twitter.com/andybee"
+        }
+    ],
+    "require": {},
+    "require-dev": {
+        "slim/slim": "^3.12",
+        "phpunit/phpunit": "^8.0",
+        "donatj/mock-webserver": "^2.0"
+    },
+    "scripts": {
+        "test": [
+            "phpunit"
+        ]
+    }
+}
