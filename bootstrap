@@ -282,7 +282,9 @@ function performRequest(array $request): array
     fclose($pipes[0]);
 
     stream_set_blocking($pipes[1], false);
+    stream_set_blocking($pipes[2], false);
     $responseRaw = '';
+    $err = '';
 
     $start = microtime(true);
     $timeout = false;
@@ -293,12 +295,11 @@ function performRequest(array $request): array
             break;
         }
         $responseRaw .= fread($pipes[1], 1024);
+        $err .= fread($pipes[2], 1024);
         usleep(100);
     }
 
     fclose($pipes[1]);
-
-    $err = stream_get_contents($pipes[2]);
     fclose($pipes[2]);
 
     proc_terminate($process);
