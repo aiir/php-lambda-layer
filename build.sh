@@ -4,7 +4,10 @@ PHP_MINOR_VERSION=$1
 
 echo echo "Building layer for PHP 7.$PHP_MINOR_VERSION - using Remi repository"
 
-yum install -y httpd wget yum-utils
+yum install -y httpd wget
+git clone https://github.com/rpm-software-management/yum-utils.git
+cd yum-utils/
+make install
 wget https://dl.fedoraproject.org/pub/epel/epel-release-latest-6.noarch.rpm
 wget https://rpms.remirepo.net/enterprise/remi-release-6.rpm
 rpm -Uvh remi-release-6.rpm
