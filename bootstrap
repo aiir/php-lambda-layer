@@ -302,7 +302,7 @@ function performRequest(array $request): array
     fclose($pipes[1]);
     fclose($pipes[2]);
 
-    proc_terminate($process);
+    proc_terminate($process, 2);
 
     if ($err !== '') {
         echo $err;
