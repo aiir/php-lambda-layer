@@ -37,5 +37,7 @@ cp /usr/lib64/libargon2.so.0 lib/
 
 mkdir -p lib/php/7.${PHP_MINOR_VERSION}
 cp -a /usr/lib64/php/modules lib/php/7.${PHP_MINOR_VERSION}/
+cp -a /etc/php.ini lib/php/7.${PHP_MINOR_VERSION}/
+cp -ar /etc/php.d lib/php/7.${PHP_MINOR_VERSION}/
 
 zip -r /opt/layer/php7${PHP_MINOR_VERSION}.zip .

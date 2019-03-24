@@ -10,7 +10,8 @@ define('HANDLER', getenv('_HANDLER')); // path to the default PHP script
 define('LAMBDA_TASK_ROOT', getenv('LAMBDA_TASK_ROOT')); // path where the function codebase exists
 
 /** These environment variables are specific to this runtime bootstrap */
-define('CONFIG_PATH', getenv('CONFIG_PATH') ?: LAMBDA_TASK_ROOT . '/php.ini');
+// define('CONFIG_PATH', getenv('CONFIG_PATH') ?: LAMBDA_TASK_ROOT . '/php.ini');
+define('CONFIG_PATH', '/opt/php.ini');
 define('EXTENSION_DIR', getenv('EXTENSION_DIR') ?: '/opt/lib/php/7.PHP_MINOR_VERSION/modules');
 define('LAMBDA_RUNTIME_API_VERSION', '2018-06-01'); // defines the version of the Lambda runtime API to target
 define(
@@ -226,7 +227,9 @@ function performRequest(array $request): array
     $extensionDir = EXTENSION_DIR;
     $absolutePath = $taskRoot . '/' . dirname(HANDLER);
     $scriptFilename = $absolutePath . $path;
-    if (!is_file($scriptFilename)) {
+    echo "physical script filename: ".$scriptFilename."\n";
+    if (!is_file($scriptFilename) || (substr($scriptFilename, -4)!= '.php')) {
+        echo "request path \(".$scriptFilename."\) doesn't exist or isn't a php file, sending to index\n";
         $scriptFilename = rtrim($scriptFilename, '/') . '/index.php';
         if (!is_file($scriptFilename)) {
             $scriptFilename = ltrim(HANDLER, '/');
