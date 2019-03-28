@@ -23,7 +23,7 @@ define(
         '/invocation/error'    => 'POST'
     ]
 ); // maps API routes to which HTTP method they use
-define('MAX_EXECUTION_TIME', intval(getenv('MAX_EXECUTION_TIME') ?: 10)); // how long PHP should be allow to run for
+define('MAX_EXECUTION_TIME', intval(getenv('MAX_EXECUTION_TIME') ?: 30)); // how long PHP should be allow to run for
 define('ACCESS_LOG', getenv('ACCESS_LOG')); // should access log string be output
 define('ACCESS_FORMAT', getenv('ACCESS_FORMAT') ?: '"%m %r%Q%q" %s %f %d'); // format access log string takes
 
@@ -63,6 +63,7 @@ function sendRuntimeEvent(string $type, array $body = null, array $invocation = 
     curl_setopt($ch, CURLOPT_FAILONERROR, true);
     if ($method === 'POST') {
         $bodyString = json_encode($body);
+echo "in sendLambdaResponse, lambda engine request body: ".$bodyString."\n\n";
         curl_setopt($ch, CURLOPT_POST, 1);
         curl_setopt($ch, CURLOPT_POSTFIELDS, $bodyString);
         curl_setopt($ch, CURLOPT_HTTPHEADER, [
@@ -85,7 +86,6 @@ function sendRuntimeEvent(string $type, array $body = null, array $invocation = 
         $responseHeaders[$key][] = trim($value);
         return strlen($header);
     });
-
     $responseBody = '';
     curl_setopt($ch, CURLOPT_WRITEFUNCTION, function ($ch, $chunk) use (&$responseBody) {
         $responseBody .= $chunk;
@@ -102,6 +102,7 @@ function sendRuntimeEvent(string $type, array $body = null, array $invocation = 
     curl_close($ch);
 
     $response = ['headers' => $responseHeaders, 'body' => $responseBody];
+echo "in sendLambdaResponse, lambda engine response: ".json_encode($response)."\n\n";
 
     return $response;
 }
@@ -152,6 +153,9 @@ function getNextInvocation(): array
     }
 
     $event = (array) json_decode($body, true);
+    if (substr($event['path'],-4)=='.php') {
+    //echo 'DEBUG Invocation Event>'.var_dump($event);
+    }
     $invocation = ['id' => $id, 'event' => $event];
 
     return $invocation;
@@ -231,9 +235,12 @@ function performRequest(array $request): array
     if (!is_file($scriptFilename) || (substr($scriptFilename, -4)!= '.php')) {
         echo "request path \(".$scriptFilename."\) doesn't exist or isn't a php file, sending to index\n";
         $scriptFilename = rtrim($scriptFilename, '/') . '/index.php';
+        echo "new scriptFilename: ".$scriptFilename."\n";
         if (!is_file($scriptFilename)) {
             $scriptFilename = ltrim(HANDLER, '/');
+            echo "new scriptFilename: ".$scriptFilename."\n";
         } else if (substr($path, -1) !== '/') {
+            echo "sending 301 redirect to ".$path."\n";
             return [
                 'status' => '301 Moved Permanently',
                 'statusCode' => 301,
@@ -244,6 +251,7 @@ function performRequest(array $request): array
             ];
         }
     }
+    //echo "DEBUG: INBOUND HEADERS>".var_dump($requestHeaders)."\n";
     $scriptName = str_replace($absolutePath, '', $scriptFilename);
 
     if (file_exists('/opt/bin/php-cgi')) {
@@ -251,6 +259,7 @@ function performRequest(array $request): array
     } else {
         $cgiPath = '';
     }
+    $rh_lower=array_change_key_case($requestHeaders, CASE_LOWER);
 
     $cmd = "${cgiPath}php-cgi -c \"${configPath}\" -d extension_dir=\"${extensionDir}\"";
     $descriptorSpec = [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']];
@@ -259,7 +268,7 @@ function performRequest(array $request): array
         $_SERVER,
         [
             'CONTENT_LENGTH'  => strlen($requestBody),
-            'CONTENT_TYPE'    => (@$requestHeaders['content-type'] ?: ''),
+            'CONTENT_TYPE'    => (@$rh_lower['content-type'] ?: ''),
             'QUERY_STRING'    => $queryString,
             'REDIRECT_STATUS' => 200,
             'REQUEST_METHOD'  => $method,
@@ -280,6 +289,10 @@ function performRequest(array $request): array
         $exception = new Exception('Failed to launch PHP process');
         throw $exception;
     }
+    //if (strlen($requestBody)>0) {
+	    //echo 'DEBUG request env to php-cgi:>'.var_dump($env)."\n";
+	    //echo 'DEBUG request body to php-cgi:>'.$requestBody."\n";
+    //}
 
     fwrite($pipes[0], $requestBody);
     fclose($pipes[0]);
@@ -323,6 +336,7 @@ function performRequest(array $request): array
         ];
     }
 
+    echo 'DEBUG response body from php-cgi:>'.$responseRaw."\n";
     $status = '200 OK';
     [$responseHeadersRaw, $responseBody] = explode("\r\n\r\n", $responseRaw, 2);
     $responseHeaders = array_reduce(
@@ -342,6 +356,8 @@ function performRequest(array $request): array
         []
     );
     [$statusCode,] = explode(' ', $status, 2);
+
+    echo 'DEBUG response headers after reduce:>'.json_encode($responseHeaders)."\n";
 
     if (ACCESS_LOG) {
         $patterns = [
@@ -389,23 +405,29 @@ function createResponse(array $invocation, array $httpResponse): array
     ['event' => $event] = $invocation;
     ['status' => $status, 'statusCode' => $statusCode, 'headers' => $headers, 'body' => $body] = $httpResponse;
     $response = ['statusCode' => (int) $statusCode, 'body' => $body];
-
     $isApplicationLoadBalancerRequest = array_key_exists('requestContext', $event);
+    echo "ALB? ".array_key_exists('requestContext', $event)."\n";
     if ($isApplicationLoadBalancerRequest) {
-        $response['statusDescription'] = $status;
+	    //$response['statusDescription'] = $status;
+	    ob_start();
+	       var_dump($event['requestContext']);
+	       $s = ob_get_clean();
+	    echo "ALB: [".$s."]\n";
     }
-
+    $event['multiValueHeaders']=true;
     $hasMultiValueHeaders = array_key_exists('multiValueHeaders', $event);
     if ($hasMultiValueHeaders) {
         $response['multiValueHeaders'] = $headers;
     } else {
-        $response['headers'] = array_map(
+        $response['headers'] = $headers; /*array_map(
             function ($value) {
                 return $value[0];
-            },
+	    },
             $headers
-        );
+	    //);*/
     }
+echo "in createResponse after multivalue, headers: ".json_encode($response['multiValueHeaders'])."\n\n";
+
 
     $hasBase64EncodingProperty = array_key_exists('isBase64Encoded', $event);
     if ($hasBase64EncodingProperty) {
