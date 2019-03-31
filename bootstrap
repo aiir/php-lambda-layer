@@ -200,6 +200,7 @@ function createRequest(array $invocation): array
     if ($isBase64Encoded) {
         $body = base64_decode($body);
     }
+    $env['APIGW_STAGE']=$event['stage'];
 
     $request = [
         'method' => $method,
@@ -207,6 +208,8 @@ function createRequest(array $invocation): array
         'query_string' => $queryString,
         'headers' => $headers,
         'body' => $body,
+	'env' => $env,
+	
     ];
 
     return $request;
@@ -224,6 +227,7 @@ function performRequest(array $request): array
         'query_string' => $queryString,
         'headers' => $requestHeaders,
         'body' => $requestBody,
+	'env' => $env,
     ] = $request;
 
     $taskRoot = LAMBDA_TASK_ROOT;
@@ -266,6 +270,7 @@ function performRequest(array $request): array
     $cwd = LAMBDA_TASK_ROOT;
     $env = array_merge(
         $_SERVER,
+	$env,
         [
             'CONTENT_LENGTH'  => strlen($requestBody),
             'CONTENT_TYPE'    => (@$rh_lower['content-type'] ?: ''),
