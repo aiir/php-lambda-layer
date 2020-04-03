@@ -10,7 +10,7 @@ This layer utilises the PHP CGI runtime to replicate the environment offered in 
 
 A Lambda function using this runtime layer is intended to sit behind either an Application Load Balancer or API Gateway, providing an HTTP interface in to the function.
 
-The layer runs a PHP 7.3 CGI process for each incoming request, executing either a PHP script whose path matches the incoming HTTP request or alternativing using the script at the path configured as the handler for the Lambda function.
+The layer runs a PHP CGI process for each incoming request, executing either a PHP script whose path matches the incoming HTTP request or alternativing using the script at the path configured as the handler for the Lambda function.
 
 The bootstrap is responsible for obtaining an incoming request, re-formatting it from the ALB/Gateway event object in to a format that the PHP process understands, executing the script, then re-formatting the response back to a format that AWS can return to the originating requester.
 
@@ -40,7 +40,7 @@ You can optionally format the output by declaring the `ACCESS_FORMAT` variable. 
 The default value is `"%m %r%Q%q" %s %f %d`.
 
 ### Extensions
-The following extensions are built into the layer and available in `/opt/lib/php/7.3/modules`:
+The following extensions are built into the layer and available in `/opt/lib/php/7.x/modules` (where x is the current minor version):
 
 ```
 bz2.so
@@ -78,7 +78,17 @@ These extensions are not loaded by default. You must add the extension to a php.
 extension=json.so
 ```
 
-It is recommended that custom extensions be provided by a separate Lambda Layer with the extension .so files placed in /lib/php/7.3/modules/ so they can be loaded alongside the built-in extensions listed above.
+It is recommended that custom extensions be provided by a separate Lambda Layer with the extension .so files placed in `/lib/php/7.x/modules/` so they can be loaded alongside the built-in extensions listed above.
+
+### Amazon Linux 2
+
+The PHP 7.4 layer is targeted to an environment running Amazon Linux 2. It may run on an earlier version, but you are encourage to run it against v2.
+
+At the time of publication Lambda defaults to containers running 1.x variants of Amazon's own Linux distribution. To force your Lambda to run on Amazon Linux 2, you must add the following "fake" Lambda Layer to your function:
+
+```
+arn:aws:lambda:::awslayer:AmazonLinux2
+```
 
 ## Development
 
@@ -100,13 +110,19 @@ make test
 
 ### Building
 
-To build the layer zip package you will need to have Docker available on your machine. Once ready, simply run the default `Makefile` command:
+To build the layer zip package you will need to have Docker available on your machine. Once ready, simply run the relevant `Makefile` command for the version of PHP you require, either:
 
 ```
-make
+make php73.zip
 ```
 
-This will launch a Docker container and build `php73.zip`.
+or
+
+```
+make php74.zip
+```
+
+This will launch a Docker container and build a layer zip file for you in the current directory.
 
 ## Disclaimer
 
