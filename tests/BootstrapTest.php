@@ -402,11 +402,28 @@ final class BootstrapTest extends TestCase
             'body' => '',
         ]);
 
-        $this->expectOutputString("Response size is too large for ALB (1000167 bytes)\n");
+        $this->expectOutputRegex('/^Response size is too large for ALB \([0-9]{7,} bytes\)\n$/');
         $invocation = handleNextRequest();
 
         $response = $this->getInvocationResponse();
         $this->assertEquals(500, $response->statusCode);
+    }
+
+    public function testCurl(): void
+    {
+        $url = 'https://www.google.com/';
+
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+
+        curl_exec($ch);
+
+        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+        curl_close($ch);
+
+        $this->assertEquals(200, $status);
     }
 
     /**
