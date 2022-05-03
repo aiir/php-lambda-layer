@@ -11,7 +11,7 @@ define('LAMBDA_TASK_ROOT', getenv('LAMBDA_TASK_ROOT')); // path where the functi
 
 /** These environment variables are specific to this runtime bootstrap */
 define('CONFIG_PATH', getenv('CONFIG_PATH') ?: LAMBDA_TASK_ROOT . '/php.ini');
-define('EXTENSION_DIR', getenv('EXTENSION_DIR') ?: '/opt/lib/php/7.PHP_MINOR_VERSION/modules');
+define('EXTENSION_DIR', getenv('EXTENSION_DIR') ?: '/opt/lib/php/8.0/modules');
 define('LAMBDA_RUNTIME_API_VERSION', '2018-06-01'); // defines the version of the Lambda runtime API to target
 define(
     'EVENT_TYPE_METHODS',
