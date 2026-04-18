@@ -18,7 +18,7 @@
     "require": {},
     "require-dev": {
         "slim/slim": "^3.12",
-        "phpunit/phpunit": "^8.0",
+        "phpunit/phpunit": "^12.5",
         "donatj/mock-webserver": "^2.0"
     },
     "scripts": {
