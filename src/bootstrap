@@ -11,7 +11,7 @@ define('LAMBDA_TASK_ROOT', getenv('LAMBDA_TASK_ROOT')); // path where the functi
 
 /** These environment variables are specific to this runtime bootstrap */
 define('CONFIG_PATH', getenv('CONFIG_PATH') ?: LAMBDA_TASK_ROOT . '/php.ini');
-define('EXTENSION_DIR', getenv('EXTENSION_DIR') ?: '/opt/lib/php/8.0/modules');
+define('EXTENSION_DIR', getenv('EXTENSION_DIR') ?: '/opt/lib/php/8.5/modules');
 define('LAMBDA_RUNTIME_API_VERSION', '2018-06-01'); // defines the version of the Lambda runtime API to target
 define(
     'EVENT_TYPE_METHODS',
@@ -37,13 +37,12 @@ foreach ([AWS_LAMBDA_RUNTIME_API, HANDLER, LAMBDA_TASK_ROOT] as $value) {
 
 /**
  * Sends events to the Lambda custom runtime API.
- * @return array
  */
-function sendRuntimeEvent(string $type, array $body = null, array $invocation = null): array
+function sendRuntimeEvent(string $type, ?array $body = null, ?array $invocation = null): array
 {
     $isValidEventType = array_key_exists($type, EVENT_TYPE_METHODS);
     if (!$isValidEventType) {
-        throw new Exception("Unrecognised runtime event type: ${type}");
+        throw new Exception("Unrecognised runtime event type: {$type}");
     }
     $method = EVENT_TYPE_METHODS[$type];
     if ($method === 'GET' && $body !== null) {
@@ -53,9 +52,9 @@ function sendRuntimeEvent(string $type, array $body = null, array $invocation = 
     $version = LAMBDA_RUNTIME_API_VERSION;
     if ($invocation !== null && array_key_exists('id', $invocation)) {
         $invocationId = $invocation['id'];
-        $type = str_replace('/invocation/', "/invocation/${invocationId}/", $type);
+        $type = str_replace('/invocation/', "/invocation/{$invocationId}/", $type);
     }
-    $url = "http://${host}/${version}/runtime${type}";
+    $url = "http://{$host}/{$version}/runtime{$type}";
 
     $ch = curl_init($url);
 
@@ -95,10 +94,8 @@ function sendRuntimeEvent(string $type, array $body = null, array $invocation = 
 
     if (curl_error($ch)) {
         $error = curl_error($ch);
-        throw new Exception("Failed to reach Lambda runtime API: ${error}");
+        throw new Exception("Failed to reach Lambda runtime API: {$error}");
     }
-
-    curl_close($ch);
 
     $response = ['headers' => $responseHeaders, 'body' => $responseBody];
 
@@ -109,7 +106,7 @@ function sendRuntimeEvent(string $type, array $body = null, array $invocation = 
  * If the runtime encounters an error during initialization, it posts an error
  * message to the initialization error path.
  */
-function sendInitilizationError($message): array
+function sendInitilizationError(string $message): array
 {
     $body = ['errorMessage' => $message, 'errorType' => 'InitError'];
     $response = sendRuntimeEvent('/init/error', $body);
@@ -121,7 +118,7 @@ function sendInitilizationError($message): array
  * If the function returns an error, the runtime formats the error into a JSON
  * document, and posts it to the invocation error path.
  */
-function sendInvocationError($invocation, $message): array
+function sendInvocationError(array $invocation, string $message): array
 {
     $body = ['errorMessage' => $message, 'errorType' => 'InvocationError'];
     $response = sendRuntimeEvent('/invocation/error', $body, $invocation);
@@ -138,7 +135,7 @@ function getNextInvocation(): array
         $response = sendRuntimeEvent('/invocation/next');
     } catch (Exception $error) {
         $message = $error->getMessage();
-        throw new Exception("Failed to fetch next Lambda invocation: ${message}");
+        throw new Exception("Failed to fetch next Lambda invocation: {$message}");
     }
     ['headers' => $headers, 'body' => $body] = $response;
     if (!array_key_exists('lambda-runtime-aws-request-id', $headers) ||
@@ -159,9 +156,6 @@ function getNextInvocation(): array
 /**
  * Formats an incoming invocation event in to an HTTP request object for passing
  * to the CGI process.
- *
- * @param array $event The invocation's API Gateway or ALB event object.
- * @return array HTTP request object.
  */
 function createRequest(array $invocation): array
 {
@@ -249,13 +243,13 @@ function performRequest(array $request): array
         $cgiPath = '';
     }
 
-    $cmd = "${cgiPath}php-cgi -c \"${configPath}\" -d extension_dir=\"${extensionDir}\"";
+    $cmd = "{$cgiPath}php-cgi -c \"{$configPath}\" -d extension_dir=\"{$extensionDir}\"";
     $descriptorSpec = [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']];
     $cwd = LAMBDA_TASK_ROOT;
     $env = array_merge(
         $_SERVER,
         [
-            'CONTENT_LENGTH'  => strlen($requestBody),
+            'CONTENT_LENGTH'  => strlen($requestBody ?? ''),
             'CONTENT_TYPE'    => (@$requestHeaders['content-type'] ?: ''),
             'QUERY_STRING'    => $queryString,
             'REDIRECT_STATUS' => 200,
@@ -278,7 +272,7 @@ function performRequest(array $request): array
         throw $exception;
     }
 
-    fwrite($pipes[0], $requestBody);
+    fwrite($pipes[0], $requestBody ?? '');
     fclose($pipes[0]);
 
     stream_set_blocking($pipes[1], false);
@@ -286,6 +280,7 @@ function performRequest(array $request): array
     $responseRaw = '';
     $err = '';
 
+    $duration = 0;
     $start = microtime(true);
     $timeout = false;
     while (!feof($pipes[1])) {
@@ -325,7 +320,8 @@ function performRequest(array $request): array
     $responseHeaders = array_reduce(
         explode(PHP_EOL, $responseHeadersRaw),
         function ($carry, $line) use (&$status) {
-            [$key, $value] = array_map('trim', explode(':', $line, 2));
+            if (trim($line) === '') return $carry;
+            [$key, $value] = array_map('trim', explode(':', $line, 2)) + ['', ''];
             if ($key === 'Status') {
                 $status = $value;
                 return $carry;
@@ -458,6 +454,6 @@ function handleNextRequest(): void
     }
 }
 
-while (isset($loop) ? $loop : true) {
+while (true) {
     handleNextRequest();
 }

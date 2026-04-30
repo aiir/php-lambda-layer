@@ -1,29 +1,45 @@
 #!/usr/bin/env sh
 
-REQUIRED_LIB_FILES="/usr/lib64/libedit.so.0
-/usr/lib64/libonig.so.2"
+# tidy up any previous attempts
+rm layer.zip
+rm -rf build
 
-echo "Building layer for PHP 8 - using Amazon Linux Extras"
+# this line force Docker to build for arm64 regardless of host architecture
+docker buildx build --platform linux/arm64 -t aiir/php .
 
-amazon-linux-extras enable php8.0
-yum install -y php-cli php-dom php-mbstring php-mysqlnd
+# create a container from the docker image, which should contain a PHP installation
+docker run -d --name dummy --platform linux/arm64 --entrypoint sleep aiir/php infinity
 
-mkdir /tmp/layer
-cd /tmp/layer
-cp /opt/layer/php.ini .
-cp /opt/layer/bootstrap .
-chmod a+x bootstrap
+# extract the required files from the container to the host file system
+mkdir -p build/bin build/lib/php
 
-mkdir bin
-cp /usr/bin/php bin/
-cp /usr/bin/php-cgi bin/
+docker cp dummy:/usr/bin/php build/bin/
+docker cp dummy:/usr/bin/php-cgi build/bin/
+docker cp -a dummy:/usr/lib64/php8.5/modules build/lib/php/
 
-mkdir lib
-for LIB in $REQUIRED_LIB_FILES; do
-  cp $LIB lib/
+# get all unique shared library dependencies for both binaries, resolve symlinks, and copy both symlink and real file
+docker exec dummy sh -c '
+  ldd /usr/bin/php /usr/bin/php-cgi \
+    | grep -oP "(?<=> )/[^ ]+" \
+    | sort -u \
+    | while read -r lib; do
+        echo "$lib"
+        readlink -f "$lib"
+      done \
+    | sort -u
+' | while read -r path; do
+    docker cp "dummy:$path" build/lib/
 done
 
-mkdir -p lib/php/8.0
-cp -a /usr/lib64/php/modules lib/php/8.0/
+# destroy the container
+docker rm -f dummy
 
-zip -r /opt/layer/php80.zip .
+# copy the bootstrap and config
+cp src/bootstrap build/
+cp src/php.ini build/
+
+# create the layer zip file
+cd build
+zip -ry ../layer.zip .
+cd ..
+rm -rf build
