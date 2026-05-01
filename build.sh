@@ -11,15 +11,15 @@ docker buildx build --platform linux/arm64 -t aiir/php .
 docker run -d --name dummy --platform linux/arm64 --entrypoint sleep aiir/php infinity
 
 # extract the required files from the container to the host file system
-mkdir -p build/bin build/lib/php
+mkdir -p build/bin build/lib/php/8.5
 
 docker cp dummy:/usr/bin/php build/bin/
 docker cp dummy:/usr/bin/php-cgi build/bin/
-docker cp -a dummy:/usr/lib64/php8.5/modules build/lib/php/
+docker cp -a dummy:/usr/lib64/php8.5/modules build/lib/php/8.5/
 
 # get all unique shared library dependencies for both binaries, resolve symlinks, and copy both symlink and real file
 docker exec dummy sh -c '
-  ldd /usr/bin/php /usr/bin/php-cgi \
+  ldd /usr/bin/php /usr/bin/php-cgi /usr/lib64/php8.5/modules/*.so \
     | grep -oP "(?<=> )/[^ ]+" \
     | sort -u \
     | while read -r lib; do
