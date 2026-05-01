@@ -69,6 +69,7 @@ function sendRuntimeEvent(string $type, ?array $body = null, ?array $invocation 
         ]);
     }
 
+    /** @var array<string, array<mixed>> $responseHeaders */
     $responseHeaders = [];
     curl_setopt($ch, CURLOPT_HEADERFUNCTION, function ($ch, $header) use (&$responseHeaders) {
         $isValidHeader = preg_match('/:\s*/', $header);
