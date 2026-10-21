@@ -21,7 +21,7 @@ define(
         '/invocation/error'    => 'POST'
     ]
 ); // maps API routes to which HTTP method they use
-define('MAX_EXECUTION_TIME', intval(getenv('MAX_EXECUTION_TIME') ?: 10)); // how long PHP should be allow to run for
+define('DEADLINE_MARGIN', 0.5); // seconds before Lambda's invocation deadline that PHP is stopped, leaving time to respond
 define('ACCESS_LOG', getenv('ACCESS_LOG')); // should access log string be output
 define('ACCESS_FORMAT', getenv('ACCESS_FORMAT') ?: '"%m %r%Q%q" %s %f %d'); // format access log string takes
 
@@ -147,8 +147,14 @@ function getNextInvocation(): array
         throw new Exception('Empty Lambda invocation response');
     }
 
+    // when Lambda will time out this invocation, as a Unix timestamp in seconds
+    $deadline = null;
+    if (array_key_exists('lambda-runtime-deadline-ms', $headers)) {
+        $deadline = intval($headers['lambda-runtime-deadline-ms'][0]) / 1000;
+    }
+
     $event = (array) json_decode($body, true);
-    $invocation = ['id' => $id, 'event' => $event];
+    $invocation = ['id' => $id, 'event' => $event, 'deadline' => $deadline];
 
     return $invocation;
 }
@@ -196,6 +202,7 @@ function createRequest(array $invocation): array
         'query_string' => $queryString,
         'headers' => $headers,
         'body' => $body,
+        'deadline' => $invocation['deadline'],
     ];
 
     return $request;
@@ -213,6 +220,7 @@ function performRequest(array $request): array
         'query_string' => $queryString,
         'headers' => $requestHeaders,
         'body' => $requestBody,
+        'deadline' => $deadline,
     ] = $request;
 
     $taskRoot = LAMBDA_TASK_ROOT;
@@ -284,8 +292,9 @@ function performRequest(array $request): array
     $start = microtime(true);
     $timeout = false;
     while (!feof($pipes[1])) {
-        $duration = (microtime(true) - $start);
-        if ($duration > MAX_EXECUTION_TIME) {
+        $now = microtime(true);
+        $duration = ($now - $start);
+        if ($deadline !== null && $now > $deadline - DEADLINE_MARGIN) {
             $timeout = true;
             break;
         }
@@ -297,15 +306,22 @@ function performRequest(array $request): array
     fclose($pipes[1]);
     fclose($pipes[2]);
 
-    proc_terminate($process, 2);
+    // wait for php-cgi to exit, killing it if it overruns the deadline, then release it so no zombie process remains
+    while (proc_get_status($process)['running']) {
+        if ($timeout || ($deadline !== null && microtime(true) > $deadline - DEADLINE_MARGIN)) {
+            proc_terminate($process, 9);
+            break;
+        }
+        usleep(100);
+    }
+    proc_close($process);
 
     if ($err !== '') {
         echo $err;
     }
 
     if ($timeout) {
-        $maxExecutionTime = MAX_EXECUTION_TIME;
-        echo "PHP took longer than $maxExecutionTime seconds to return response";
+        printf('PHP failed to return a response for %s within the Lambda timeout, stopped after %.2f seconds' . PHP_EOL, $path, $duration);
 
         return [
             'status' => '500 Internal Server Error',
@@ -437,20 +453,32 @@ function sendLambdaResponse(array $invocation, array $lambdaResponse): array
  */
 function handleNextRequest(): void
 {
+    // without an invocation the runtime API is unusable, so exit and let Lambda start a fresh runtime
     try {
         $invocation = getNextInvocation();
-    } catch (Exception $e) {
-        sendInitilizationError($e->getMessage());
-        return;
+    } catch (Throwable $e) {
+        echo $e->getMessage() . PHP_EOL;
+        try {
+            sendInitilizationError($e->getMessage());
+        } catch (Throwable $reportError) {
+            echo 'Failed to report error to Lambda: ' . $reportError->getMessage() . PHP_EOL;
+        }
+        exit(1);
     }
 
+    // catch everything, including PHP Errors, so a failed request never takes down the runtime
     try {
         $request = createRequest($invocation);
         $httpResponse = performRequest($request);
         $lambdaResponse = createResponse($invocation, $httpResponse);
         sendLambdaResponse($invocation, $lambdaResponse);
-    } catch (Exception $e) {
-        sendInvocationError($invocation, $e->getMessage());
+    } catch (Throwable $e) {
+        echo $e->getMessage() . PHP_EOL;
+        try {
+            sendInvocationError($invocation, $e->getMessage());
+        } catch (Throwable $reportError) {
+            echo 'Failed to report error to Lambda: ' . $reportError->getMessage() . PHP_EOL;
+        }
     }
 }
 
