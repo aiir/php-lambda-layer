@@ -251,7 +251,9 @@ function performRequest(array $request): array
         $cgiPath = '';
     }
 
-    $cmd = "{$cgiPath}php-cgi -c \"{$configPath}\" -d extension_dir=\"{$extensionDir}\"";
+    // always load the layer's newer time zone data, by absolute path so a custom EXTENSION_DIR still finds it
+    $cmd = "{$cgiPath}php-cgi -c \"{$configPath}\" -d extension_dir=\"{$extensionDir}\""
+        . " -d extension=/opt/lib/php/modules/timezonedb.so";
     $descriptorSpec = [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']];
     $cwd = LAMBDA_TASK_ROOT;
     $env = array_merge(

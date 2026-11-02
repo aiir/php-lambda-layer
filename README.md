@@ -51,6 +51,13 @@ extension=dom.so
 
 It is recommended that additional extensions be provided by a separate Lambda Layer with the extension .so files placed in the `/lib/php/modules` directory so they can be loaded alongside the built-in extensions listed above.
 
+### Time Zone Data
+
+The time zone data in Amazon Linux lags behind tz releases, so the build bundles the latest available for both of PHP's time zone databases:
+
+- PHP's date functions use the [`timezonedb`](https://pecl.php.net/package/timezonedb) extension, which the layer always loads. PHP only uses its data when it is newer than the system's `tzdata`. Do not add `extension=timezonedb.so` to your own `php.ini`, as loading it twice causes a warning on every request.
+- ICU (used by the `intl` extension) uses the latest ICU time zone data from [unicode-org/icu-data](https://github.com/unicode-org/icu-data), bundled in `/opt/icu-tz`. The bootstrap points ICU at it by setting `ICU_TIMEZONE_FILES_DIR`, unless the function sets that variable itself.
+
 ### Architecture
 
 `arm64` is the target architecture for this Lambda layer.

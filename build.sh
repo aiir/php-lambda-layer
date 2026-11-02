@@ -13,20 +13,24 @@ PLATFORM=linux/arm64
 # glibc must match the runtime's dynamic loader, so it is never bundled
 GLIBC='^(ld-linux.*|libc|libm|libdl|libpthread|librt|libresolv|libutil)\.so'
 
+# Amazon Linux's ICU time zone data lags behind tz releases, so the latest is bundled from icu-data
+ICU_DATA_REPO=https://github.com/unicode-org/icu-data.git
+ICU_TZ_PATH=tzdata/icunew
+
 BUILD_CONTAINER="aiir-php-build-$$"
 RUNTIME_CONTAINER="aiir-php-runtime-$$"
 
-# always remove the containers and working directory, whether the build succeeds or fails
+# always remove the containers and working directories, whether the build succeeds or fails
 cleanup() {
   docker rm -f "$BUILD_CONTAINER" "$RUNTIME_CONTAINER" >/dev/null 2>&1 || true
-  rm -rf build
+  rm -rf build icu-data
 }
 trap cleanup EXIT
 trap 'exit 1' INT TERM
 
 # tidy up any previous attempts
 rm -f layer.zip
-rm -rf build
+rm -rf build icu-data
 
 # build from scratch for arm64 regardless of host architecture; --pull and --no-cache ensure the newest
 # base image and packages are used rather than cached layers from an earlier build
@@ -86,13 +90,38 @@ for lib in $LIBS; do
   fi
 done
 
+# report the time zone data versions Amazon Linux provides, before the bundled data replaces them
+SYSTEM_TZ=$(docker exec "$BUILD_CONTAINER" php -r 'echo timezone_version_get();')
+docker exec "$BUILD_CONTAINER" php -r '
+  echo "Amazon Linux tzdata ", timezone_version_get(), ", ICU ", INTL_ICU_VERSION,
+    " with tz data ", IntlTimeZone::getTZDataVersion(), "\n";
+'
+
+# fetch only the latest commit, and only the time zone directory, as the full icu-data repo is large
+git clone -q --depth 1 --filter=blob:none --sparse "$ICU_DATA_REPO" icu-data
+git -C icu-data sparse-checkout set "$ICU_TZ_PATH"
+
+# releases are named by tz version (e.g. 2026f), so the last in sort order is the latest
+TZ_VERSION=$(ls "icu-data/$ICU_TZ_PATH" | grep -E '^[0-9]{4}[a-z]+$' | sort | tail -n 1)
+if [ -z "$TZ_VERSION" ]; then
+  echo "No tz releases found in icu-data" >&2
+  exit 1
+fi
+
+# ICU reads its data files as format 44, little-endian on arm64
+mkdir -p build/icu-tz
+cp "icu-data/$ICU_TZ_PATH/$TZ_VERSION/44/le/"*.res build/icu-tz/
+echo "Bundling tz data $TZ_VERSION (icu-data $(git -C icu-data rev-parse --short HEAD))"
+
 # copy the bootstrap and config
 cp src/bootstrap src/bootstrap.php src/php.ini build/
 chmod +x build/bootstrap
 
-# verify the layer in a clean runtime: no missing libraries, both binaries start, and every extension
-# loads without warnings (extensions that others depend on are loaded first)
-docker run --rm --platform "$PLATFORM" -v "$(pwd)/build:/opt:ro" --entrypoint sh "$RUNTIME_IMAGE" -c '
+# verify the layer in a clean runtime: no missing libraries, both binaries start, every extension
+# loads without warnings (extensions that others depend on are loaded first), and both PHP and ICU use
+# the bundled time zone data
+docker run --rm --platform "$PLATFORM" -v "$(pwd)/build:/opt:ro" -e TZ_VERSION="$TZ_VERSION" \
+  -e SYSTEM_TZ="$SYSTEM_TZ" --entrypoint sh "$RUNTIME_IMAGE" -c '
   set -e
   export LD_LIBRARY_PATH="/opt/lib:$LD_LIBRARY_PATH"
   if ldd /opt/bin/php /opt/bin/php-cgi /opt/lib/php/modules/*.so | grep "not found"; then
@@ -111,6 +140,19 @@ docker run --rm --platform "$PLATFORM" -v "$(pwd)/build:/opt:ro" --entrypoint sh
     exit 1
   fi
   echo "Verified $(ls /opt/lib/php/modules | wc -l) extensions"
+  ICU=$(ICU_TIMEZONE_FILES_DIR=/opt/icu-tz /opt/bin/php -n -d extension_dir=/opt/lib/php/modules \
+    -d extension=intl -r "echo INTL_ICU_VERSION, \" \", IntlTimeZone::getTZDataVersion();")
+  if [ "${ICU#* }" != "$TZ_VERSION" ]; then
+    echo "ICU is using tz data ${ICU#* } rather than the bundled $TZ_VERSION" >&2
+    exit 1
+  fi
+  echo "Verified ICU ${ICU% *} with tz data ${ICU#* }"
+  PHP_TZ=$(/opt/bin/php -c /opt/php.ini -r "echo timezone_version_get();")
+  if /opt/bin/php -n -r "exit(version_compare(\"$PHP_TZ\", \"$SYSTEM_TZ\", \"<\") ? 0 : 1);"; then
+    echo "PHP is using tz data $PHP_TZ, older than the system $SYSTEM_TZ" >&2
+    exit 1
+  fi
+  echo "Verified PHP tz data $PHP_TZ"
 '
 
 # create the layer zip file
