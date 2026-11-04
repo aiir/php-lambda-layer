@@ -1,14 +1,8 @@
 # PHP Runtime Layer for AWS Lambda
 
-This runtime layer aims to replicate the typical web server environment for executing PHP scripts within AWS Lambda, so that an Lambda function can be used as an alternative hosting environment for a PHP-based site.
+This runtime layer aims to replicate the typical web server environment for executing PHP scripts within AWS Lambda, so that an Lambda function can be used as an alternative hosting environment for a PHP-based application.
 
 This layer utilises the PHP CGI runtime to replicate the environment offered in other runtime setups such as PHP FPM.
-
-## PHP 8
-
-This repo has been updated to PHP 8.0 and with the intention of fully supporting the `arm64` Lambda environment.
-
-Because of this this version now uses Amazon Linux Extras for a PHP 8.0 build. At the time of development, despite the stable release of 8.1, no repositories for x86 and arm64 builds of PHP 8.x were available. Should this change in the future it is hoped to update this project accordingly.
 
 ## Usage
 
@@ -46,70 +40,45 @@ You can optionally format the output by declaring the `ACCESS_FORMAT` variable. 
 The default value is `"%m %r%Q%q" %s %f %d`.
 
 ### Extensions
-The following extensions are built into the layer and available in `/opt/lib/php/8.0/modules`:
 
-```
-bz2.so
-calendar.so
-ctype.so
-curl.so
-dom.so
-exif.so
-fileinfo.so
-ftp.so
-gettext.so
-iconv.so
-mbstring.so
-mysqli.so
-mysqlnd.so
-pdo.so
-pdo_mysql.so
-pdo_sqlite.so
-phar.so
-simplexml.so
-sockets.so
-sqlite3.so
-tokenizer.so
-xml.so
-xmlreader.so
-xmlwriter.so
-xsl.so
-zip.so
-```
+When building, the default extensions for the most recent PHP version will be included in `/opt/lib/php/modules`.
 
-These extensions are not loaded by default. You must add the extension to a php.ini file to use it:
+These extensions are not loaded by default. You must add the extension to a `php.ini` file to use it, e.g.
 
 ```ini
 extension=dom.so
 ```
 
-It is recommended that custom extensions be provided by a separate Lambda Layer with the extension .so files placed in `/lib/php/8.0/modules/` so they can be loaded alongside the built-in extensions listed above.
+It is recommended that additional extensions be provided by a separate Lambda Layer with the extension .so files placed in the `/lib/php/modules` directory so they can be loaded alongside the built-in extensions listed above.
 
-### Amazon Linux 2
+### Time Zone Data
 
-The PHP 8.0 layer is targeted to an environment running Amazon Linux 2, which at the time of development was the default environment for Lambda functions.
+The time zone data in Amazon Linux lags behind tz releases, so the build bundles the latest available for both of PHP's time zone databases:
 
-When the build script is run under an arm64 environment, it will produce a layer suitable for running within an arm64 Lambda. Similarly running under x86 will provide an x86 layer.
+- PHP's date functions use the [`timezonedb`](https://pecl.php.net/package/timezonedb) extension, which the layer always loads. PHP only uses its data when it is newer than the system's `tzdata`. Do not add `extension=timezonedb.so` to your own `php.ini`, as loading it twice causes a warning on every request.
+- ICU (used by the `intl` extension) uses the latest ICU time zone data from [unicode-org/icu-data](https://github.com/unicode-org/icu-data), bundled in `/opt/icu-tz`. The bootstrap points ICU at it by setting `ICU_TIMEZONE_FILES_DIR`, unless the function sets that variable itself.
+
+### Architecture
+
+`arm64` is the target architecture for this Lambda layer.
 
 ## Development
 
 ### Building
 
-To build the layer zip package you will need to launch an EC2 instance running Amazon Linux v2. Choose the architecture based on which you wish to use for your final Lambda functions.
+The build process requires Docker to boot a container provided by Amazon which replicates the current Lambda environment.
 
-Once your EC2 instance is booted and you have a copy of this repo available, run the `build.sh` script.
+With a system that has Docker installed, run `./build.sh`. This script will build a new Docker image from the Amazon-supplied one, launch a container and then copy the required files for PHP to execute on Lambda from the container to the local file system, before creating a zip file.
 
-This will build a layer zip file (`php80.zip`) for you in the current directory.
+The resulting `layer.zip` file is your final Lambda layer.
 
 ### Testing
 
-A basic PHPUnit functional test case is provided for the bootstrap. You can run this locally although this will target your local machines PHP environment. 
+In the `test` directory is as `run.sh` script which will launch the Amazon-supplied Lambda environment container on a local Docker install, supplying the most recent layer build on your local system to it.
 
-```
-composer test
-```
+This will result in an HTTP server on port 9000 which mimics the Lambda environment, ready to receive invocation requests.
 
-This assumes you have PHP and composer setup in your local environment.
+The second script in this directory, `request.sh`, provides an example of how to send a request to the HTTP server.
 
 ## Disclaimer
 

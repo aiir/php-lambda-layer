@@ -1,4 +1,3 @@
-#!/opt/bin/php -c/opt/php.ini
 <?php
 /**
  * AWS Lambda custom runtime for PHP
@@ -11,7 +10,7 @@ define('LAMBDA_TASK_ROOT', getenv('LAMBDA_TASK_ROOT')); // path where the functi
 
 /** These environment variables are specific to this runtime bootstrap */
 define('CONFIG_PATH', getenv('CONFIG_PATH') ?: LAMBDA_TASK_ROOT . '/php.ini');
-define('EXTENSION_DIR', getenv('EXTENSION_DIR') ?: '/opt/lib/php/8.0/modules');
+define('EXTENSION_DIR', getenv('EXTENSION_DIR') ?: '/opt/lib/php/modules');
 define('LAMBDA_RUNTIME_API_VERSION', '2018-06-01'); // defines the version of the Lambda runtime API to target
 define(
     'EVENT_TYPE_METHODS',
@@ -22,7 +21,7 @@ define(
         '/invocation/error'    => 'POST'
     ]
 ); // maps API routes to which HTTP method they use
-define('MAX_EXECUTION_TIME', intval(getenv('MAX_EXECUTION_TIME') ?: 10)); // how long PHP should be allow to run for
+define('DEADLINE_MARGIN', 0.5); // seconds before Lambda's invocation deadline that PHP is stopped, leaving time to respond
 define('ACCESS_LOG', getenv('ACCESS_LOG')); // should access log string be output
 define('ACCESS_FORMAT', getenv('ACCESS_FORMAT') ?: '"%m %r%Q%q" %s %f %d'); // format access log string takes
 
@@ -37,13 +36,12 @@ foreach ([AWS_LAMBDA_RUNTIME_API, HANDLER, LAMBDA_TASK_ROOT] as $value) {
 
 /**
  * Sends events to the Lambda custom runtime API.
- * @return array
  */
-function sendRuntimeEvent(string $type, array $body = null, array $invocation = null): array
+function sendRuntimeEvent(string $type, ?array $body = null, ?array $invocation = null): array
 {
     $isValidEventType = array_key_exists($type, EVENT_TYPE_METHODS);
     if (!$isValidEventType) {
-        throw new Exception("Unrecognised runtime event type: ${type}");
+        throw new Exception("Unrecognised runtime event type: {$type}");
     }
     $method = EVENT_TYPE_METHODS[$type];
     if ($method === 'GET' && $body !== null) {
@@ -53,9 +51,9 @@ function sendRuntimeEvent(string $type, array $body = null, array $invocation = 
     $version = LAMBDA_RUNTIME_API_VERSION;
     if ($invocation !== null && array_key_exists('id', $invocation)) {
         $invocationId = $invocation['id'];
-        $type = str_replace('/invocation/', "/invocation/${invocationId}/", $type);
+        $type = str_replace('/invocation/', "/invocation/{$invocationId}/", $type);
     }
-    $url = "http://${host}/${version}/runtime${type}";
+    $url = "http://{$host}/{$version}/runtime{$type}";
 
     $ch = curl_init($url);
 
@@ -70,6 +68,7 @@ function sendRuntimeEvent(string $type, array $body = null, array $invocation = 
         ]);
     }
 
+    /** @var array<string, array<mixed>> $responseHeaders */
     $responseHeaders = [];
     curl_setopt($ch, CURLOPT_HEADERFUNCTION, function ($ch, $header) use (&$responseHeaders) {
         $isValidHeader = preg_match('/:\s*/', $header);
@@ -95,10 +94,8 @@ function sendRuntimeEvent(string $type, array $body = null, array $invocation = 
 
     if (curl_error($ch)) {
         $error = curl_error($ch);
-        throw new Exception("Failed to reach Lambda runtime API: ${error}");
+        throw new Exception("Failed to reach Lambda runtime API: {$error}");
     }
-
-    curl_close($ch);
 
     $response = ['headers' => $responseHeaders, 'body' => $responseBody];
 
@@ -109,7 +106,7 @@ function sendRuntimeEvent(string $type, array $body = null, array $invocation = 
  * If the runtime encounters an error during initialization, it posts an error
  * message to the initialization error path.
  */
-function sendInitilizationError($message): array
+function sendInitilizationError(string $message): array
 {
     $body = ['errorMessage' => $message, 'errorType' => 'InitError'];
     $response = sendRuntimeEvent('/init/error', $body);
@@ -121,7 +118,7 @@ function sendInitilizationError($message): array
  * If the function returns an error, the runtime formats the error into a JSON
  * document, and posts it to the invocation error path.
  */
-function sendInvocationError($invocation, $message): array
+function sendInvocationError(array $invocation, string $message): array
 {
     $body = ['errorMessage' => $message, 'errorType' => 'InvocationError'];
     $response = sendRuntimeEvent('/invocation/error', $body, $invocation);
@@ -138,7 +135,7 @@ function getNextInvocation(): array
         $response = sendRuntimeEvent('/invocation/next');
     } catch (Exception $error) {
         $message = $error->getMessage();
-        throw new Exception("Failed to fetch next Lambda invocation: ${message}");
+        throw new Exception("Failed to fetch next Lambda invocation: {$message}");
     }
     ['headers' => $headers, 'body' => $body] = $response;
     if (!array_key_exists('lambda-runtime-aws-request-id', $headers) ||
@@ -150,8 +147,14 @@ function getNextInvocation(): array
         throw new Exception('Empty Lambda invocation response');
     }
 
+    // when Lambda will time out this invocation, as a Unix timestamp in seconds
+    $deadline = null;
+    if (array_key_exists('lambda-runtime-deadline-ms', $headers)) {
+        $deadline = intval($headers['lambda-runtime-deadline-ms'][0]) / 1000;
+    }
+
     $event = (array) json_decode($body, true);
-    $invocation = ['id' => $id, 'event' => $event];
+    $invocation = ['id' => $id, 'event' => $event, 'deadline' => $deadline];
 
     return $invocation;
 }
@@ -159,9 +162,6 @@ function getNextInvocation(): array
 /**
  * Formats an incoming invocation event in to an HTTP request object for passing
  * to the CGI process.
- *
- * @param array $event The invocation's API Gateway or ALB event object.
- * @return array HTTP request object.
  */
 function createRequest(array $invocation): array
 {
@@ -202,6 +202,7 @@ function createRequest(array $invocation): array
         'query_string' => $queryString,
         'headers' => $headers,
         'body' => $body,
+        'deadline' => $invocation['deadline'],
     ];
 
     return $request;
@@ -219,6 +220,7 @@ function performRequest(array $request): array
         'query_string' => $queryString,
         'headers' => $requestHeaders,
         'body' => $requestBody,
+        'deadline' => $deadline,
     ] = $request;
 
     $taskRoot = LAMBDA_TASK_ROOT;
@@ -249,13 +251,15 @@ function performRequest(array $request): array
         $cgiPath = '';
     }
 
-    $cmd = "${cgiPath}php-cgi -c \"${configPath}\" -d extension_dir=\"${extensionDir}\"";
+    // always load the layer's newer time zone data, by absolute path so a custom EXTENSION_DIR still finds it
+    $cmd = "{$cgiPath}php-cgi -c \"{$configPath}\" -d extension_dir=\"{$extensionDir}\""
+        . " -d extension=/opt/lib/php/modules/timezonedb.so";
     $descriptorSpec = [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']];
     $cwd = LAMBDA_TASK_ROOT;
     $env = array_merge(
         $_SERVER,
         [
-            'CONTENT_LENGTH'  => strlen($requestBody),
+            'CONTENT_LENGTH'  => strlen($requestBody ?? ''),
             'CONTENT_TYPE'    => (@$requestHeaders['content-type'] ?: ''),
             'QUERY_STRING'    => $queryString,
             'REDIRECT_STATUS' => 200,
@@ -278,7 +282,7 @@ function performRequest(array $request): array
         throw $exception;
     }
 
-    fwrite($pipes[0], $requestBody);
+    fwrite($pipes[0], $requestBody ?? '');
     fclose($pipes[0]);
 
     stream_set_blocking($pipes[1], false);
@@ -286,11 +290,13 @@ function performRequest(array $request): array
     $responseRaw = '';
     $err = '';
 
+    $duration = 0;
     $start = microtime(true);
     $timeout = false;
     while (!feof($pipes[1])) {
-        $duration = (microtime(true) - $start);
-        if ($duration > MAX_EXECUTION_TIME) {
+        $now = microtime(true);
+        $duration = ($now - $start);
+        if ($deadline !== null && $now > $deadline - DEADLINE_MARGIN) {
             $timeout = true;
             break;
         }
@@ -302,15 +308,22 @@ function performRequest(array $request): array
     fclose($pipes[1]);
     fclose($pipes[2]);
 
-    proc_terminate($process, 2);
+    // wait for php-cgi to exit, killing it if it overruns the deadline, then release it so no zombie process remains
+    while (proc_get_status($process)['running']) {
+        if ($timeout || ($deadline !== null && microtime(true) > $deadline - DEADLINE_MARGIN)) {
+            proc_terminate($process, 9);
+            break;
+        }
+        usleep(100);
+    }
+    proc_close($process);
 
     if ($err !== '') {
         echo $err;
     }
 
     if ($timeout) {
-        $maxExecutionTime = MAX_EXECUTION_TIME;
-        echo "PHP took longer than $maxExecutionTime seconds to return response";
+        printf('PHP failed to return a response for %s within the Lambda timeout, stopped after %.2f seconds' . PHP_EOL, $path, $duration);
 
         return [
             'status' => '500 Internal Server Error',
@@ -325,7 +338,8 @@ function performRequest(array $request): array
     $responseHeaders = array_reduce(
         explode(PHP_EOL, $responseHeadersRaw),
         function ($carry, $line) use (&$status) {
-            [$key, $value] = array_map('trim', explode(':', $line, 2));
+            if (trim($line) === '') return $carry;
+            [$key, $value] = array_map('trim', explode(':', $line, 2)) + ['', ''];
             if ($key === 'Status') {
                 $status = $value;
                 return $carry;
@@ -441,23 +455,35 @@ function sendLambdaResponse(array $invocation, array $lambdaResponse): array
  */
 function handleNextRequest(): void
 {
+    // without an invocation the runtime API is unusable, so exit and let Lambda start a fresh runtime
     try {
         $invocation = getNextInvocation();
-    } catch (Exception $e) {
-        sendInitilizationError($e->getMessage());
-        return;
+    } catch (Throwable $e) {
+        echo $e->getMessage() . PHP_EOL;
+        try {
+            sendInitilizationError($e->getMessage());
+        } catch (Throwable $reportError) {
+            echo 'Failed to report error to Lambda: ' . $reportError->getMessage() . PHP_EOL;
+        }
+        exit(1);
     }
 
+    // catch everything, including PHP Errors, so a failed request never takes down the runtime
     try {
         $request = createRequest($invocation);
         $httpResponse = performRequest($request);
         $lambdaResponse = createResponse($invocation, $httpResponse);
         sendLambdaResponse($invocation, $lambdaResponse);
-    } catch (Exception $e) {
-        sendInvocationError($invocation, $e->getMessage());
+    } catch (Throwable $e) {
+        echo $e->getMessage() . PHP_EOL;
+        try {
+            sendInvocationError($invocation, $e->getMessage());
+        } catch (Throwable $reportError) {
+            echo 'Failed to report error to Lambda: ' . $reportError->getMessage() . PHP_EOL;
+        }
     }
 }
 
-while (isset($loop) ? $loop : true) {
+while (true) {
     handleNextRequest();
 }

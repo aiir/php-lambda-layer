@@ -1,0 +1,11 @@
+#!/bin/sh
+
+# Lambda searches /lib64 before /opt/lib, so put the layer's libraries first; the layer only bundles
+# libraries that are missing from, or differ to, those in the Lambda runtime
+export LD_LIBRARY_PATH="/opt/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# Amazon Linux's ICU time zone data lags behind tz releases, so use the newer data bundled in the layer,
+# unless the function points ICU elsewhere; php-cgi inherits this along with the rest of the environment
+export ICU_TIMEZONE_FILES_DIR="${ICU_TIMEZONE_FILES_DIR:-/opt/icu-tz}"
+
+exec /opt/bin/php -c /opt/php.ini /opt/bootstrap.php "$@"
